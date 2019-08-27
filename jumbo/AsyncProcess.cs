@@ -117,11 +117,11 @@ namespace jumbo
         //status.proc.StartInfo.RedirectStandardInput = true;
         status.proc.StartInfo.RedirectStandardOutput = true;
         status.proc.StartInfo.RedirectStandardError = true;
-        status.proc.StartInfo.CreateNoWindow = true;
+        status.proc.StartInfo.CreateNoWindow = true; 
 
         status.proc.EnableRaisingEvents = true;
 
-        status.proc.Exited += (s, e) => {
+        status.proc.Exited += (s, e) => { 
           status.running = false;
         };
 
