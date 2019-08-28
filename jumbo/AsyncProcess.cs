@@ -1,18 +1,32 @@
 ﻿using System;
 using System.Diagnostics;
 using System.IO;
-using System.Linq;
-using System.Runtime.InteropServices;
 using System.Text;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Runtime.InteropServices;
 
 
 namespace jumbo
 {
+  //
+  public class ProcStatus
+  {
+    public Process proc = null;
+    public AutoResetEvent exit_event = new AutoResetEvent(false);
+    public bool running = false;
+    public int exit_code = 0;
+  }
+
+
+  //
   public class AsyncProcess
   {
     // WinAPI imports
+
+    // Ctrl+C signal
+    internal const int CTRL_C_EVENT = 0;
 
     [DllImport("kernel32.dll")]
     internal static extern bool GenerateConsoleCtrlEvent(uint dwCtrlEvent, uint dwProcessGroupId);
@@ -42,28 +56,6 @@ namespace jumbo
       SEM_NOOPENFILEERRORBOX = 0x8000
     }
 
-    // Ctrl+C signal
-    internal const int CTRL_C_EVENT = 0;
-
-
-    //
-    public struct ProcResult
-    {
-      public int? ExitCode;
-      public string Output;
-      public string Error;
-    }
-
-
-    //
-    protected class ProcStatus
-    {
-      public Process proc = null;
-      public AutoResetEvent exit_event = new AutoResetEvent(false);
-      public bool running = false;
-    }
-    protected static ProcStatus status = new ProcStatus();
-
 
     // Delegates
     public delegate void CallbackEventHandler(string arg);
@@ -71,41 +63,31 @@ namespace jumbo
     public event CallbackEventHandler ErrorCallback;
 
 
-    //public Process ShellProcess {
-    //  get {
-    //    return process;
-    //  }
-    //}
-
-    //public int Id {
-    //  get {
-    //    if (process == null) return 0;
-    //    return process.Id;
-    //  }
-    //}
-
-    public bool IsRunning {
-      get {
-        //if (status.proc == null) return false;
-        //try {Process.GetProcessById(status.proc.Id);}
-        //catch (InvalidOperationException) { return false; }
-        //catch (ArgumentException){return false;}
-        //return true;
-
-        return status.running;
-     }
-   }
-
-
-
-
-
-
     //
+    protected ProcStatus status = null;
+
+
+    // ctor
+    public AsyncProcess()
+    {
+      status = new ProcStatus();
+    }
+
+
+    public bool IsRunning
+    {
+      get { return status.running; }
+    }
+
+
+
+    // Based on: https://gist.github.com/georg-jung/3a8703946075d56423e418ea76212745
     public async Task<int> Run(string command, string arguments, int timeout)
     {      
-      ProcResult result = new ProcResult();
-      int exit_code = 0;
+      // Sanity check
+      if (status == null) {
+        return -1;
+      }
 
       using ( status.proc = new Process() )
       {
@@ -118,8 +100,10 @@ namespace jumbo
         status.proc.StartInfo.RedirectStandardOutput = true;
         status.proc.StartInfo.RedirectStandardError = true;
         status.proc.StartInfo.CreateNoWindow = true; 
-
         status.proc.EnableRaisingEvents = true;
+
+        TaskCompletionSource<bool> out_done = new TaskCompletionSource<bool>();
+        TaskCompletionSource<bool> err_done = new TaskCompletionSource<bool>();
 
         status.proc.Exited += (s, e) => { 
           status.running = false;
@@ -129,35 +113,14 @@ namespace jumbo
           status.running = false;
         };
 
-        //StringBuilder out_buff = new StringBuilder();
-        TaskCompletionSource<bool> out_done = new TaskCompletionSource<bool>();
-
         status.proc.OutputDataReceived += (s, e) => {
-          if (e.Data == null) {
-            out_done.SetResult(true);
-          }
-          else {
-            //out_buff.Append(e.Data);
-            //out_buff.Append("\r\n");
-            OutputCallback(e.Data);
-          }
+          if (e.Data == null) out_done.SetResult(true);
+          else OutputCallback(e.Data);
         };
 
-        string err = String.Empty;
-        //StringBuilder err_buff = new StringBuilder();
-        TaskCompletionSource<bool> err_done = new TaskCompletionSource<bool>();
-
         status.proc.ErrorDataReceived += (s, e) => {
-          if (e.Data == null) {
-            err_done.SetResult(true);
-          }
-          else {
-            //err_buff.Append(e.Data);
-            //err_buff.Append("\r\n");
-            ErrorCallback(e.Data);
-            //
-            err = (string)e.Data.Clone();            
-          }
+          if (e.Data == null) err_done.SetResult(true);
+          else ErrorCallback(e.Data);          
         };
 
         lock(this)
@@ -165,23 +128,12 @@ namespace jumbo
           using (ChangeErrorMode mode = new ChangeErrorMode(ErrorModes.SEM_FAILCRITICALERRORS | ErrorModes.SEM_NOGPFAULTERRORBOX))
           {
             status.exit_event.Reset();
-
             if (!status.proc.Start()) {
               status.running = false;
-              result.ExitCode = status.proc.ExitCode;
-              //return result;
-              return -1;  //
+              status.exit_event.Set(); // ?
+              return -1;
             }
-            else {
-              status.running = true;
-            }
-
-            //if (!status.proc.Start()) {
-            //  status.running = false;
-            //  //status.exit_event.Set();
-            //  return -1;
-            //}
-            //status.running = true;
+            status.running = true;
           }
         }
 
@@ -196,36 +148,18 @@ namespace jumbo
         Task<bool[]> process_done = Task.WhenAll(timeout_done, out_done.Task, err_done.Task);
 
         // Waits process completion and then checks it was not completed by timeout
-        if (await Task.WhenAny(Task.Delay(timeout), process_done) == process_done && timeout_done.Result)
-        {
-          ////status.proc.CancelOutputRead();
-          ////status.proc.CancelErrorRead();
-
-          result.ExitCode = status.proc.ExitCode;
-          ////result.Output = out_buff.ToString();
-          ////result.Error = err_buff.ToString();
-          result.Error = err;
-          exit_code =  status.proc.ExitCode;
+        if (await Task.WhenAny(Task.Delay(timeout), process_done) == process_done && timeout_done.Result) {
+          status.exit_code = status.proc.ExitCode;
         }
-
         else {
           try { status.proc.Kill(); }
           catch {}
         }
         
-
-        // NEW
-        //bool ok = await Task.WhenAny(Task.Delay(timeout), process_done) == process_done && timeout_done.Result;
-        //if (!ok) {
-        //  try { status.proc.Kill(); }
-        //  catch {}
-        //}
-
       }  // using process
 
-      status.exit_event.Set(); // <--
-      //return result;
-      return exit_code;
+      status.exit_event.Set();
+      return status.exit_code;
     }
 
 
@@ -233,8 +167,11 @@ namespace jumbo
     //
     public bool Abort()
     {
-      bool ok = ThreadPool.QueueUserWorkItem(new WaitCallback(AbortMethod));
-      return ok;
+      try {
+        return ThreadPool.QueueUserWorkItem(new WaitCallback(AbortMethod), status);
+      }
+      catch (Exception) { }
+      return false;
     }
 
 
@@ -242,20 +179,17 @@ namespace jumbo
     //
     protected static void AbortMethod(object data) 
     {
-      if (status.proc == null) {
+      ProcStatus status = (ProcStatus)data;
+      if (status == null || status.proc == null) {
         return;
       }
-      bool ok = false;
 
       FreeConsole();
       AttachConsole((uint)status.proc.Id);
       SetConsoleCtrlHandler(null, true);
+      GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0);
 
-      if (!GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0)) {
-        ok = false;
-      }
-
-      status.exit_event.WaitOne(3000);
+      status.exit_event.WaitOne(2000);
 
       // Die wicked-witch
       if (status.running) {
