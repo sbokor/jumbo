@@ -5,7 +5,6 @@ using System.Data;
 using System.Diagnostics;
 using System.Drawing;
 using System.Linq;
-using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -13,11 +12,25 @@ using System.Threading.Tasks;
 using System.Windows.Forms;
 
 
-
 namespace jumbo
 {
   public partial class Form1 : Form
   {
+    public class AppStatus
+    {
+      public AsyncProcess proc = null;
+      public AutoResetEvent exit_event = new AutoResetEvent(false);
+      public string status = "READY";  // READY, ANALYZING, DOWNLOADING, DONE
+      public int duration = 0;         // total length in microsec
+      public double percent = 0;       // % completed
+      public string eta = "";          // ETA hh:mm:ss
+    }
+
+
+    //
+    protected AppStatus app = null;
+
+
     public Form1()
     {
       InitializeComponent();
@@ -26,14 +39,9 @@ namespace jumbo
       richTextBox1.Tag = richTextBox1.Height;
       richTextBox1.Visible = false;
       this.Height -= (int)richTextBox1.Tag;
+
+      app = new AppStatus();
     }
-
-    //
-    protected AsyncProcess proc = null;
-    protected AutoResetEvent exit_event = new AutoResetEvent(false);
-    protected string status = "";
-    protected int duration = 0;  // us
-
 
     
     //
@@ -41,7 +49,7 @@ namespace jumbo
     {
       if (string.IsNullOrWhiteSpace(textBox1.Text) ||
           string.IsNullOrWhiteSpace(textBox2.Text) ||
-          (proc != null && proc.IsRunning))
+          (app.proc != null && app.proc.IsRunning))
       {
         button1.Enabled = false;
         button1.ForeColor = Color.White;
@@ -54,7 +62,7 @@ namespace jumbo
       }
 
 
-      if (proc != null && proc.IsRunning) {
+      if (app.proc != null && app.proc.IsRunning) {
         button3.Enabled = true;
         button3.ForeColor = Color.Black;
         button3.BackColor = Color.LightGray;
@@ -70,41 +78,36 @@ namespace jumbo
 
     private async void button1_Click(object sender, EventArgs e)
     {
-      status = "";
-      label3.Text = "Ready";
+      // Init
       ShowProgress("");
       richTextBox1.Text = "";
-
-      exit_event.Reset();  //
-
+      app.exit_event.Reset();
 
       string cmd = @"C:\bin\ffmpeg\bin\ffmpeg.exe";
       string opt = "";
       int timeout = -1;  //ms
 
-      opt += $"-hide_banner -stats -progress pipe:1 ";  // -v quiet -stats -loglevel info 
-      opt += $"-i {textBox1.Text} ";
-      //opt += $"-map p:6 ";      
+      opt += $"-hide_banner -stats -progress pipe:1 ";
+      opt += $"-i {textBox1.Text} ";    
       opt += $"-c copy -bsf:a aac_adtstoasc ";
       opt += $"{textBox2.Text} ";
       //opt += $"-ss 00:00:10 -vframes 2 -vf scale=\"400:-1\" -q:v 1 {textBox2.Text}_%01d.jpg ";
       //opt += $"-y ";
 
-      proc = new AsyncProcess();
-      proc.OutputCallback += new AsyncProcess.CallbackEventHandler(OnOutput);
-      proc.ErrorCallback += new AsyncProcess.CallbackEventHandler(OnError);
+      app.proc = new AsyncProcess();
+      app.proc.OutputCallback += new AsyncProcess.CallbackEventHandler(OnOutput);
+      app.proc.ErrorCallback += new AsyncProcess.CallbackEventHandler(OnError);
 
-      //Task<AsyncProcess.ProcResult> t = proc.Run(cmd, opt, timeout);
-      //AsyncProcess.ProcResult ret = await t;
-
-      Task<int> t = proc.Run(cmd, opt, timeout);
+      Task<int> t = app.proc.Run(cmd, opt, timeout);
       int ret = await t;
 
-      if (exit_event.WaitOne(100)) {
+      if (app.exit_event.WaitOne(100)) {
         Application.Exit();
       }
 
+      app.status = "DONE";
       label3.Text = "Done";
+      ShowProgress("");
 
       //if (ret != 0) {
       //}
@@ -135,11 +138,13 @@ namespace jumbo
       string val = (string)data.Clone();
 
       if (val.Contains("Duration:")) {
-        this.duration = GetDuration(val);
+        GetDuration(val);
       }
-      else if (status != "DONLOADING") {
+
+      if (app.status != "DOWNLOADING") {
         this.Invoke(new Action(() => {
-           label3.Text = "Analyzing ...";
+          app.status = "ANALYZING";
+          label3.Text = "Analyzing ...";
         }));
       }
 
@@ -154,35 +159,34 @@ namespace jumbo
 
     private void button2_Click(object sender, EventArgs e)
     {
-      if (saveFileDialog1.ShowDialog() == DialogResult.OK) {
-        textBox2.Text = saveFileDialog1.FileName;
-      }
+      if (saveFileDialog1.ShowDialog() != DialogResult.OK) return;
+      textBox2.Text = saveFileDialog1.FileName;
     }
 
 
 
     private void button3_Click(object sender, EventArgs e)
     {
-      proc.Abort();
+      app.proc.Abort();
     }
 
 
 
-    protected int GetDuration(string line)
+    protected void GetDuration(string line)
     {
       line = line.Trim();
       Regex rx = new Regex(@"^Duration: ([0-9]{2}):([0-9]{2}):([0-9]{2})\.([0-9]+)");
       Match match = rx.Match(line);
-
-      if (match.Groups.Count != 5) return 0;
+      if (match.Groups.Count != 5) return;
 
       int.TryParse(match.Groups[1].Value, out int h);
       int.TryParse(match.Groups[2].Value, out int m);
       int.TryParse(match.Groups[3].Value, out int s);
 
-      int us = ((h * 3600) + (m * 60) + s) * 1000000;
+      TimeSpan t = new TimeSpan(h, m, s);
+      int us = (int)t.TotalMilliseconds * 1000;
 
-      return us;
+      app.duration = us;
     }
 
 
@@ -193,6 +197,7 @@ namespace jumbo
 
       if (line == "") {
         this.Invoke(new Action(() => {
+          //label3.Text = "Ready";
           progressBar1.Value = 0;
           progressBar1.Refresh();
           progressBar1.CreateGraphics().DrawString("0%", new Font("Arial", (float)8.25, FontStyle.Bold), 
@@ -203,17 +208,19 @@ namespace jumbo
 
       Regex rx = new Regex(@"out_time_us=([0-9]+)$");
       Match match = rx.Match(line);
-
       if (match.Groups.Count != 2) return;
 
       double.TryParse(match.Groups[1].Value, out double us);
-
-      double percent = us/(this.duration/100.00);
+      double percent = us/(app.duration/100.00);  // TODO: validate 'duration'
       percent = Math.Round(percent, 1);
 
+      TimeSpan t = TimeSpan.FromMilliseconds((app.duration - us)/1000);
+      string eta = string.Format("{0:D2}:{1:D2}:{2:D2}", t.Hours, t.Minutes, t.Seconds);
+
+
       this.Invoke(new Action(() => {
-        status = "DONLOADING";
-        label3.Text = $"Downloading ...";
+        app.status = "DOWNLOADING";
+        label3.Text = $"Downloading ... {eta}";
         progressBar1.Value = (int)(percent * 10);
         progressBar1.Refresh();
         progressBar1.CreateGraphics().DrawString(percent.ToString() + "%", new Font("Arial", (float)8.25, FontStyle.Bold), 
@@ -225,10 +232,10 @@ namespace jumbo
 
     private void Form1_FormClosing(object sender, FormClosingEventArgs e)
     {
-      exit_event.Reset();
+      app.exit_event.Reset();
       e.Cancel = true;
 
-      if (proc == null || !proc.IsRunning) {
+      if (app.proc == null || !app.proc.IsRunning) {
         e.Cancel = false;
         Application.Exit();
         return;
@@ -240,8 +247,8 @@ namespace jumbo
         return;
       }
 
-      proc.Abort();
-      exit_event.Set();  //
+      app.proc.Abort();
+      app.exit_event.Set();  //
     }
 
 
@@ -269,27 +276,23 @@ namespace jumbo
 
     private void textBox1_DragDrop(object sender, DragEventArgs e)
     {
-      //textBox1.BackColor = Color.White;
       string url = (string)e.Data.GetData(DataFormats.Text);
       textBox1.Text = url;
     }
 
     private void textBox1_DragEnter(object sender, DragEventArgs e)
     {
-      //textBox1.BackColor = Color.LightGray;
     }
 
     private void textBox1_DragOver(object sender, DragEventArgs e)
     {
       e.Effect = DragDropEffects.None;
-      if (e.Data.GetDataPresent(DataFormats.Text)) {
-        e.Effect = DragDropEffects.Copy;
-      }
+      if (!e.Data.GetDataPresent(DataFormats.Text)) return;
+      e.Effect = DragDropEffects.Copy;
     }
 
 
 
+  }  // class
+}    // namespace
 
-
-  }
-}
