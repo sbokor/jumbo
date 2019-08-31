@@ -18,12 +18,27 @@ namespace jumbo
   {
     public class AppStatus
     {
+      protected string _status = "Ready";  
+
       public AsyncProcess proc = null;
-      public AutoResetEvent exit_event = new AutoResetEvent(false);
-      public string status = "READY";  // READY, ANALYZING, DOWNLOADING, DONE
+      public AutoResetEvent exit_event = new AutoResetEvent(false);     
       public int duration = 0;         // total length in microsec
       public double percent = 0;       // % completed
-      public string eta = "";          // ETA hh:mm:ss
+      public string eta = "";          // ETA hh:mm:ss 
+
+      public delegate void StatusEventHandler();
+      public event StatusEventHandler StatusChanged;
+
+      // Ready, Analyzing, Downloading, Done, Aborted
+      public string status {
+        set {
+          _status = value;
+         if (StatusChanged != null) StatusChanged();
+        }
+        get {
+          return _status;
+        }
+      }
     }
 
 
@@ -31,56 +46,85 @@ namespace jumbo
     protected AppStatus app = null;
 
 
+    // ctor
     public Form1()
     {
       InitializeComponent();
       Application.Idle += Application_Idle;
 
-      richTextBox1.Tag = richTextBox1.Height;
-      richTextBox1.Visible = false;
-      this.Height -= (int)richTextBox1.Tag;
+      TextBoxDetails.Tag = TextBoxDetails.Height;
+      TextBoxDetails.Visible = false;
+      this.Height -= (int)TextBoxDetails.Tag;
 
       app = new AppStatus();
+      app.StatusChanged += OnStatus;
     }
 
     
-    //
+    // Enable/disable controls
     private void Application_Idle(object sender, EventArgs e)
     {
-      if (string.IsNullOrWhiteSpace(textBox1.Text) ||
-          string.IsNullOrWhiteSpace(textBox2.Text) ||
+      // OK button
+      if (string.IsNullOrWhiteSpace(TextBoxInput.Text) ||
+          string.IsNullOrWhiteSpace(TextBoxOutput.Text) ||
           (app.proc != null && app.proc.IsRunning))
       {
-        button1.Enabled = false;
-        button1.ForeColor = Color.White;
-        button1.BackColor = Color.FromArgb(235,235,235);
+        ButtonOK.Enabled = false;
+        ButtonOK.ForeColor = Color.White;
+        ButtonOK.BackColor = Color.FromArgb(235,235,235);
       }
       else {
-        button1.Enabled = true;
-        button1.ForeColor = Color.Black;
-        button1.BackColor = Color.LightGray;
+        ButtonOK.Enabled = true;
+        ButtonOK.ForeColor = Color.Black;
+        ButtonOK.BackColor = Color.LightGray;
       }
 
-
+      // Output selection button
       if (app.proc != null && app.proc.IsRunning) {
-        button3.Enabled = true;
-        button3.ForeColor = Color.Black;
-        button3.BackColor = Color.LightGray;
+        ButtonOutput.Enabled = false;
+        ButtonOutput.ForeColor = Color.White;
+        ButtonOutput.BackColor = Color.FromArgb(235,235,235);
       }
       else {
-        button3.Enabled = false;
-        button3.ForeColor = Color.White;
-        button3.BackColor = Color.FromArgb(235,235,235);
+        ButtonOutput.Enabled = true;
+        ButtonOutput.ForeColor = Color.Black;
+        ButtonOutput.BackColor = Color.LightGray;
+      }
+
+      // Cancel button
+      if (app.proc != null && app.proc.IsRunning) {
+        ButtonCancel.Enabled = true;
+        ButtonCancel.ForeColor = Color.Black;
+        ButtonCancel.BackColor = Color.LightGray;
+      }
+      else {
+        ButtonCancel.Enabled = false;
+        ButtonCancel.ForeColor = Color.White;
+        ButtonCancel.BackColor = Color.FromArgb(235,235,235);
+      }
+
+      // Text boxes
+      if (app.proc != null && app.proc.IsRunning) {
+        TextBoxInput.ReadOnly = true;
+        TextBoxInput.BackColor = Color.FromArgb(235,235,235);
+        TextBoxOutput.ReadOnly = true;
+        TextBoxOutput.BackColor = Color.FromArgb(235,235,235);
+      }
+      else {
+        TextBoxInput.ReadOnly = false;
+        TextBoxInput.BackColor = Color.White;
+        TextBoxOutput.ReadOnly = false;
+        TextBoxOutput.BackColor = Color.White;
       }
     }
 
 
 
-    private async void button1_Click(object sender, EventArgs e)
+    private async void ButtonOK_Click(object sender, EventArgs e)
     {
       // Init
       ShowProgress("");
-      richTextBox1.Text = "";
+      TextBoxDetails.Text = "";
       app.exit_event.Reset();
 
       string cmd = @"C:\bin\ffmpeg\bin\ffmpeg.exe";
@@ -88,15 +132,16 @@ namespace jumbo
       int timeout = -1;  //ms
 
       opt += $"-hide_banner -stats -progress pipe:1 ";
-      opt += $"-i {textBox1.Text} ";    
+      opt += $"-i {TextBoxInput.Text} ";    
       opt += $"-c copy -bsf:a aac_adtstoasc ";
-      opt += $"{textBox2.Text} ";
+      opt += $"{TextBoxOutput.Text} ";
+
       //opt += $"-ss 00:00:10 -vframes 2 -vf scale=\"400:-1\" -q:v 1 {textBox2.Text}_%01d.jpg ";
       //opt += $"-y ";
 
       app.proc = new AsyncProcess();
-      app.proc.OutputCallback += new AsyncProcess.CallbackEventHandler(OnOutput);
-      app.proc.ErrorCallback += new AsyncProcess.CallbackEventHandler(OnError);
+      app.proc.OutputCallback += OnOutput;
+      app.proc.ErrorCallback += OnError;
 
       Task<int> t = app.proc.Run(cmd, opt, timeout);
       int ret = await t;
@@ -105,9 +150,7 @@ namespace jumbo
         Application.Exit();
       }
 
-      app.status = "DONE";
-      label3.Text = "Done";
-      ShowProgress("");
+      app.status = "Done";
 
       //if (ret != 0) {
       //}
@@ -116,23 +159,29 @@ namespace jumbo
 
 
 
-    protected void OnOutput(string data)
+    // Application events
+
+    // Status changed
+    protected void OnStatus()
     {
-      string val = (string)data.Clone();
-
-      if (val.Contains("out_time_us=")) {
-        ShowProgress(val);
-      }
-
-      //this.Invoke(new Action(() => {
-      //  richTextBox1.Text += val + "\r\n";
-      //  richTextBox1.SelectionStart = richTextBox1.Text.Length;
-      //  richTextBox1.ScrollToCaret();
-      //}));
+      this.Invoke(new Action(() => {
+        LabelStatus.Text = $"{app.status}";
+        if (app.status == "Downloading") LabelStatus.Text += $" ... {app.eta}";
+      }));
     }
 
 
+    // Standard Output changed
+    protected void OnOutput(string data)
+    {
+      string val = (string)data.Clone();
+      if (val.Contains("out_time_us=")) {
+        ShowProgress(val);
+      }
+    }
 
+
+    // Standard Error changed
     protected void OnError(string data)
     {
       string val = (string)data.Clone();
@@ -141,31 +190,28 @@ namespace jumbo
         GetDuration(val);
       }
 
-      if (app.status != "DOWNLOADING") {
-        this.Invoke(new Action(() => {
-          app.status = "ANALYZING";
-          label3.Text = "Analyzing ...";
-        }));
+      if (app.status != "Downloading") {
+        app.status = "Analyzing";
       }
 
       this.Invoke(new Action(() => {
-        richTextBox1.Text += val + "\r\n";
-        richTextBox1.SelectionStart = richTextBox1.Text.Length;
-        richTextBox1.ScrollToCaret();
+        TextBoxDetails.Text += val + "\r\n";
+        TextBoxDetails.SelectionStart = TextBoxDetails.Text.Length;
+        TextBoxDetails.ScrollToCaret();
       }));
     }
 
 
-
-    private void button2_Click(object sender, EventArgs e)
+    // Output file selected
+    private void ButtonOutput_Click(object sender, EventArgs e)
     {
       if (saveFileDialog1.ShowDialog() != DialogResult.OK) return;
-      textBox2.Text = saveFileDialog1.FileName;
+      TextBoxOutput.Text = saveFileDialog1.FileName;
     }
 
 
-
-    private void button3_Click(object sender, EventArgs e)
+    // Cancel button clicked
+    private void ButtonCancel_Click(object sender, EventArgs e)
     {
       app.proc.Abort();
     }
@@ -184,9 +230,26 @@ namespace jumbo
       int.TryParse(match.Groups[3].Value, out int s);
 
       TimeSpan t = new TimeSpan(h, m, s);
-      int us = (int)t.TotalMilliseconds * 1000;
+      app.duration = (int)t.TotalMilliseconds * 1000;
+    }
 
-      app.duration = us;
+
+
+    protected void GetProgress(string line)
+    {
+      if (app.duration == 0) return;
+
+      line = line.Trim();
+      Regex rx = new Regex(@"out_time_us=([0-9]+)$");
+      Match match = rx.Match(line);
+      if (match.Groups.Count != 2) return;
+
+      double.TryParse(match.Groups[1].Value, out double us);
+      double percent = us/(app.duration/100.00);
+      app.percent = Math.Round(percent, 1);
+
+      TimeSpan t = TimeSpan.FromMilliseconds((app.duration - us)/1000);
+      app.eta = string.Format("{0:D2}:{1:D2}:{2:D2}", t.Hours, t.Minutes, t.Seconds);
     }
 
 
@@ -197,7 +260,6 @@ namespace jumbo
 
       if (line == "") {
         this.Invoke(new Action(() => {
-          //label3.Text = "Ready";
           progressBar1.Value = 0;
           progressBar1.Refresh();
           progressBar1.CreateGraphics().DrawString("0%", new Font("Arial", (float)8.25, FontStyle.Bold), 
@@ -206,29 +268,20 @@ namespace jumbo
         return;
       }
 
-      Regex rx = new Regex(@"out_time_us=([0-9]+)$");
-      Match match = rx.Match(line);
-      if (match.Groups.Count != 2) return;
-
-      double.TryParse(match.Groups[1].Value, out double us);
-      double percent = us/(app.duration/100.00);  // TODO: validate 'duration'
-      percent = Math.Round(percent, 1);
-
-      TimeSpan t = TimeSpan.FromMilliseconds((app.duration - us)/1000);
-      string eta = string.Format("{0:D2}:{1:D2}:{2:D2}", t.Hours, t.Minutes, t.Seconds);
-
+      app.status = "Downloading";
+      GetProgress(line);
 
       this.Invoke(new Action(() => {
-        app.status = "DOWNLOADING";
-        label3.Text = $"Downloading ... {eta}";
-        progressBar1.Value = (int)(percent * 10);
+        progressBar1.Value = (int)(app.percent * 10);
         progressBar1.Refresh();
-        progressBar1.CreateGraphics().DrawString(percent.ToString() + "%", new Font("Arial", (float)8.25, FontStyle.Bold), 
+        progressBar1.CreateGraphics().DrawString(app.percent.ToString() + "%", new Font("Arial", (float)8.25, FontStyle.Bold), 
           Brushes.Black, new PointF(progressBar1.Width / 2 - 10, progressBar1.Height / 2 - 7));
       }));
     }
 
 
+
+    // Form events
 
     private void Form1_FormClosing(object sender, FormClosingEventArgs e)
     {
@@ -253,42 +306,51 @@ namespace jumbo
 
 
 
-    private void checkBox1_CheckedChanged(object sender, EventArgs e)
+    private void CheckBoxDetails_CheckedChanged(object sender, EventArgs e)
     {
+      this.MaximumSize = new Size(int.MaxValue, int.MaxValue);
+
       // Show
-      if (checkBox1.Checked) {
-        if (richTextBox1.Tag == null) return; // error
-        richTextBox1.Visible = true;
-        this.Height += (int)richTextBox1.Tag;
-        richTextBox1.Focus();
-        richTextBox1.ScrollToCaret();
+      if (CheckBoxDetails.Checked) {       
+        if (TextBoxDetails.Tag == null) return; // error
+        if ((int)TextBoxDetails.Tag == 0) TextBoxDetails.Tag = 199;
+        TextBoxDetails.Visible = true;
+        this.Height += (int)TextBoxDetails.Tag;
+        TextBoxDetails.Focus();
+        TextBoxDetails.ScrollToCaret();
       }
 
       // Hide
       else {
-        if (richTextBox1.Tag == null) richTextBox1.Tag = richTextBox1.Height;
-        richTextBox1.Visible = false;
-        this.Height -= (int)richTextBox1.Tag;
+        TextBoxDetails.Tag = TextBoxDetails.Height;
+        TextBoxDetails.Visible = false;
+        this.Height -= (int)TextBoxDetails.Tag;
       }
     }
 
 
 
-    private void textBox1_DragDrop(object sender, DragEventArgs e)
+    private void TextBoxInput_DragDrop(object sender, DragEventArgs e)
     {
       string url = (string)e.Data.GetData(DataFormats.Text);
-      textBox1.Text = url;
+      TextBoxInput.Text = url;
     }
 
-    private void textBox1_DragEnter(object sender, DragEventArgs e)
-    {
-    }
 
-    private void textBox1_DragOver(object sender, DragEventArgs e)
+    private void TextBoxInput_DragOver(object sender, DragEventArgs e)
     {
       e.Effect = DragDropEffects.None;
       if (!e.Data.GetDataPresent(DataFormats.Text)) return;
       e.Effect = DragDropEffects.Copy;
+    }
+
+
+
+    private void Form1_ResizeBegin(object sender, EventArgs e)
+    {
+      this.MaximumSize = new Size(int.MaxValue, int.MaxValue);
+      if (CheckBoxDetails.Checked) return;
+      this.MaximumSize = new Size(int.MaxValue, this.Height);
     }
 
 
