@@ -59,18 +59,30 @@ namespace jumbo
 
     // Delegates
     public delegate void CallbackEventHandler(string arg);
-    public event CallbackEventHandler OutputCallback;
-    public event CallbackEventHandler ErrorCallback;
+    public event CallbackEventHandler OutputCallback = null;
+    public event CallbackEventHandler ErrorCallback = null;
 
 
-    //
+    // Class variables
     protected ProcStatus status = null;
+    protected string cmd = String.Empty;
+    protected string opt = String.Empty;
+    int timeout = Timeout.Infinite;
 
 
     // ctor
-    public AsyncProcess()
+    public AsyncProcess(string Command,
+                        string Options = "",
+                        CallbackEventHandler OnOutput = null,
+                        CallbackEventHandler OnError = null,
+                        int Timeout = Timeout.Infinite)
     {
       status = new ProcStatus();
+      cmd = Command;
+      opt = Options;
+      if (OnOutput != null) OutputCallback += OnOutput;
+      if (OnError != null) ErrorCallback += OnError;
+      timeout = Timeout;
     }
 
 
@@ -82,7 +94,7 @@ namespace jumbo
 
 
     // Based on: https://gist.github.com/georg-jung/3a8703946075d56423e418ea76212745
-    public async Task<int> Run(string command, string arguments, int timeout)
+    public async Task<int> Run()
     {      
       // Sanity check
       if (status == null) {
@@ -91,8 +103,8 @@ namespace jumbo
 
       using ( status.proc = new Process() )
       {
-        status.proc.StartInfo.FileName = command;
-        status.proc.StartInfo.Arguments = arguments;
+        status.proc.StartInfo.FileName = this.cmd;
+        status.proc.StartInfo.Arguments = this.opt;
         status.proc.StartInfo.UseShellExecute = false;       
         status.proc.StartInfo.ErrorDialog = false;
 
@@ -115,12 +127,12 @@ namespace jumbo
 
         status.proc.OutputDataReceived += (s, e) => {
           if (e.Data == null) out_done.SetResult(true);
-          else OutputCallback(e.Data);
+          else if (OutputCallback != null) OutputCallback(e.Data);
         };
 
         status.proc.ErrorDataReceived += (s, e) => {
           if (e.Data == null) err_done.SetResult(true);
-          else ErrorCallback(e.Data);          
+          else if (ErrorCallback != null) ErrorCallback(e.Data);          
         };
 
         lock(this)
@@ -142,7 +154,7 @@ namespace jumbo
         status.proc.BeginErrorReadLine();
 
         // Creates task to wait for process exit using timeout
-        Task<bool> timeout_done = Task.Run(() => status.proc.WaitForExit(timeout));
+        Task<bool> timeout_done = Task.Run(() => status.proc.WaitForExit(this.timeout));
 
         // Create task to wait for process exit and closing all output streams
         Task<bool[]> process_done = Task.WhenAll(timeout_done, out_done.Task, err_done.Task);

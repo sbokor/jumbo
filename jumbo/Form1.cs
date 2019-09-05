@@ -204,11 +204,11 @@ namespace jumbo
       app.exit_event.Reset();
 
       // Get config
-      string cmd, output_dir;
+      string cmd = String.Empty;
       bool overwrite = false;
+
       try {
         cmd = AppConfig.PathFFMPEG;
-        output_dir = AppConfig.OutputDirectory;
         overwrite = AppConfig.OverwriteOutput;
       }
       catch (Exception ex) {
@@ -216,32 +216,28 @@ namespace jumbo
         return;
       }
       
-      
-      int timeout = Timeout.Infinite;  // ms
-
+      // ffmpeg options
       string opt = $"-hide_banner -stats -progress pipe:1 ";
       opt += $"-i {TextBoxInput.Text} ";    
       opt += $"-c copy -bsf:a aac_adtstoasc ";
       opt += $"{TextBoxOutput.Text} ";
       if (overwrite) opt += $"-y ";
-
       //opt += $"-ss 00:00:10 -vframes 2 -vf scale=\"400:-1\" -q:v 1 {textBox2.Text}_%01d.jpg ";
 
-      app.proc = new AsyncProcess();
-      app.proc.OutputCallback += OnOutput;
-      app.proc.ErrorCallback += OnError;
+      // Start
+      app.proc = new AsyncProcess(cmd, opt, OnOutput, OnError, Timeout.Infinite);
+      int ret = await app.proc.Run();
 
-      int ret = await app.proc.Run(cmd, opt, timeout);
-
-      app.status = "Done";
-
+      // AsyncProc returned
       if (app.exit_event.WaitOne(100)) {
-        Application.Exit();
+        app.status = "Exit";
       }
-      if (app.abort_event.WaitOne(100)) {
+      else if (app.abort_event.WaitOne(100)) {
         app.status = "Aborted";
       }
-
+      else {
+        app.status = "Done";
+      }
     }
 
 
@@ -251,8 +247,13 @@ namespace jumbo
     // Status changed
     protected void OnStatus()
     {
+      if (app.status == "Exit") {
+        Application.Exit();
+        return;
+      }
+
       this.Invoke(new Action(() => {
-        LabelStatus.Text = $"{app.status}";
+        LabelStatus.Text = app.status;
         if (app.status == "Downloading") LabelStatus.Text += $" ... {app.eta}";
       }));
     }
